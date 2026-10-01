@@ -8,7 +8,10 @@ import (
 
 type Version struct{ Value string }
 
-type ResolvedVersion struct{ Value string }
+type ResolvedVersion struct {
+	Value  string
+	Commit string
+}
 
 type ForgeAdapter interface {
 	Type() string

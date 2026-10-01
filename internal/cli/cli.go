@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -174,9 +175,19 @@ func runValidate(opts Options) error {
 	}
 	for name, ref := range reg.Components {
 		p := config.ResolveRef(reg, ref.Ref)
-		if _, err := component.Load(p); err != nil {
+		comp, err := component.Load(p)
+		if err != nil {
 			return fmt.Errorf("component %q: %w", name, err)
 		}
+		if _, err := source.Parse(comp.Source); err != nil {
+			return fmt.Errorf("component %q: %w", name, err)
+		}
+	}
+	if err := validateSecretRefs(reg, opts.Secrets); err != nil {
+		return err
+	}
+	if err := validateSecretsIgnored(opts.Secrets); err != nil {
+		return err
 	}
 	return nil
 }
@@ -260,7 +271,8 @@ func runInstall(opts Options, args []string) error {
 	if err != nil {
 		return err
 	}
-	resolved, err := forge.NewRegistry().Resolve(uri, reg.Forges)
+	forgeRegistry := forge.NewRegistry()
+	resolved, err := forgeRegistry.Resolve(uri, reg.Forges)
 	if err != nil {
 		return err
 	}
@@ -269,6 +281,12 @@ func runInstall(opts Options, args []string) error {
 		requested = "latest"
 	}
 	resolvedVersion := requested
+	resolvedMeta, err := forgeRegistry.ResolveVersion(context.Background(), resolved, requested)
+	if err == nil {
+		if resolvedMeta.Value != "" {
+			resolvedVersion = resolvedMeta.Value
+		}
+	}
 	if opts.Offline {
 		if _, err := (storage.FS{Root: opts.Storage}).Current(name); err == nil {
 			return nil
@@ -311,6 +329,7 @@ func runInstall(opts Options, args []string) error {
 		Source:           comp.Source,
 		RequestedVersion: requested,
 		ResolvedVersion:  resolvedVersion,
+		Commit:           resolvedMeta.Commit,
 		Path:             installPath,
 		Verified:         true,
 		Files:            files,
@@ -392,10 +411,20 @@ func runSecret(opts Options, args []string) error {
 		if len(args) < 2 {
 			return errors.New("usage: components secret set <name> <value>")
 		}
-		if len(args) < 3 {
-			return errors.New("secret value required in non-interactive mode")
+		value := ""
+		if len(args) >= 3 {
+			value = args[2]
+		} else if envVal, ok := os.LookupEnv("COMPONENTS_SECRET_VALUE"); ok {
+			value = envVal
+		} else {
+			fmt.Fprintf(os.Stderr, "Enter value for %s: ", args[1])
+			var in string
+			if _, err := fmt.Fscanln(os.Stdin, &in); err != nil {
+				return errors.New("secret value required")
+			}
+			value = in
 		}
-		if err := st.Set(args[1], args[2]); err != nil {
+		if err := st.Set(args[1], value); err != nil {
 			return err
 		}
 		if err := st.Save(); err != nil {
@@ -424,6 +453,51 @@ func relFromRepo(path string) string {
 	abs, err := util.MustAbs(path)
 	if err != nil {
 		return path
+	}
+
+	func validateSecretRefs(reg *config.Registry, secretsPath string) error {
+		st, err := secrets.Load(secretsPath)
+		if err != nil {
+			return err
+		}
+		for alias, forgeCfg := range reg.Forges {
+			if forgeCfg.Auth == nil || strings.TrimSpace(forgeCfg.Auth.Secret) == "" {
+				continue
+			}
+			secretNS := strings.TrimSpace(forgeCfg.Auth.Secret)
+			if !st.HasNamespace(secretNS) {
+				return fmt.Errorf("%s: forge %q references missing secret namespace %q", reg.Path, alias, secretNS)
+			}
+		}
+		return nil
+	}
+
+	func validateSecretsIgnored(secretsPath string) error {
+		abs, err := util.MustAbs(secretsPath)
+		if err != nil {
+			return err
+		}
+		repo, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(repo, abs)
+		if err != nil {
+			return nil
+		}
+		if strings.HasPrefix(rel, "..") {
+			return nil
+		}
+		relEntry := "./" + filepath.ToSlash(rel)
+		gitignorePath := filepath.Join(repo, ".gitignore")
+		b, err := os.ReadFile(gitignorePath)
+		if err != nil {
+			return fmt.Errorf("secrets path %q is not ignored by Git", relEntry)
+		}
+		if !util.GitIgnoreContains(string(b), relEntry) && !util.GitIgnoreContains(string(b), filepath.ToSlash(rel)) {
+			return fmt.Errorf("secrets path %q is not ignored by Git", relEntry)
+		}
+		return nil
 	}
 	repo, err := os.Getwd()
 	if err != nil {

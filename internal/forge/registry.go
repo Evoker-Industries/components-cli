@@ -1,11 +1,14 @@
 package forge
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Evoker-Industries/components-cli/internal/config"
+	"github.com/Evoker-Industries/components-cli/internal/downloader"
 	"github.com/Evoker-Industries/components-cli/internal/source"
 )
 
@@ -16,6 +19,7 @@ type ResolvedSource struct {
 	APIURL     string
 	Repository string
 	CloneURL   string
+	SecretRef  string
 }
 
 type Registry struct {
@@ -69,7 +73,37 @@ func (r *Registry) Resolve(uri *source.SourceURI, forges map[string]config.Forge
 			APIURL:     strings.TrimRight(forgeCfg.API, "/"),
 			Repository: repoURL,
 			CloneURL:   cloneURL,
+			SecretRef: func() string {
+				if forgeCfg.Auth == nil {
+					return ""
+				}
+				return strings.TrimSpace(forgeCfg.Auth.Secret)
+			}(),
 		}, nil
 	}
 	return nil, fmt.Errorf("unknown forge alias or unsupported source scheme %q", scheme)
+}
+
+func (r *Registry) ResolveVersion(ctx context.Context, source *ResolvedSource, requested string) (ResolvedVersion, error) {
+	switch source.Type {
+	case "git":
+		innerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		value, commit, err := (downloader.GitResolver{}).Resolve(innerCtx, source.CloneURL, requested)
+		if err != nil {
+			return ResolvedVersion{}, err
+		}
+		return ResolvedVersion{Value: value, Commit: commit}, nil
+	case "url":
+		if strings.TrimSpace(requested) == "" {
+			return ResolvedVersion{Value: "latest"}, nil
+		}
+		return ResolvedVersion{Value: requested}, nil
+	default:
+		adapter, ok := r.Adapter(source.Type)
+		if !ok {
+			return ResolvedVersion{}, fmt.Errorf("unsupported source type %q", source.Type)
+		}
+		return adapter.ResolveVersion(ctx, *source, requested)
+	}
 }

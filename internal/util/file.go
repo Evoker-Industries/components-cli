@@ -59,12 +59,8 @@ func EnsureGitIgnoreEntry(repoDir, entry string) error {
 		return err
 	}
 	content := string(existing)
-	if content != "" {
-		for _, line := range splitLines(content) {
-			if line == entry {
-				return nil
-			}
-		}
+	if content != "" && GitIgnoreContains(content, entry) {
+		return nil
 	}
 	if content != "" && content[len(content)-1] != '\n' {
 		content += "\n"
@@ -81,6 +77,15 @@ func splitLines(s string) []string {
 			out = append(out, cur)
 			cur = ""
 			continue
+		}
+
+		func GitIgnoreContains(content, entry string) bool {
+			for _, line := range splitLines(content) {
+				if line == entry {
+					return true
+				}
+			}
+			return false
 		}
 		if r != '\r' {
 			cur += string(r)

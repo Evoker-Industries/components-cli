@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/Evoker-Industries/components-cli/internal/util"
 )
@@ -107,4 +108,43 @@ func (s *Store) Keys() []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func (s *Store) HasNamespace(alias string) bool {
+	_, ok := s.Data[alias]
+	if ok {
+		return true
+	}
+	// Environment variables can also define the namespace.
+	prefix := "COMPONENTS_SECRET_" + normalizeEnvPart(alias) + "_"
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) Lookup(alias, field string) (string, bool) {
+	envKey := "COMPONENTS_SECRET_" + normalizeEnvPart(alias) + "_" + normalizeEnvPart(field)
+	if v, ok := os.LookupEnv(envKey); ok {
+		return v, true
+	}
+	if fields := s.Data[alias]; fields != nil {
+		v, ok := fields[field]
+		return v, ok
+	}
+	return "", false
+}
+
+func normalizeEnvPart(in string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(in) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }

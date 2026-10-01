@@ -143,6 +143,43 @@ func TestCheckFailsUnknownForgeAlias(t *testing.T) {
 	if err := os.Chdir(d); err != nil {
 		t.Fatal(err)
 	}
+
+	func TestValidateFailsForMissingSecretNamespace(t *testing.T) {
+		d := t.TempDir()
+		old, _ := os.Getwd()
+		defer os.Chdir(old)
+		if err := os.Chdir(d); err != nil {
+			t.Fatal(err)
+		}
+		if err := Run([]string{"init"}); err != nil {
+			t.Fatal(err)
+		}
+		reg := `{
+	  "forges": {
+	    "company": {
+	      "type": "forgejo",
+	      "url": "https://git.company.example",
+	      "auth": {"secret": "company"}
+	    }
+	  },
+	  "components": {
+	    "Example": {"ref": "./components/example/component.json"}
+	  }
+	}`
+		if err := os.WriteFile(filepath.Join(d, "components.json"), []byte(reg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(d, "components", "example"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := `{"component":{"name":"Example","source":"company://org/repo","version":"latest","directory":"."}}`
+		if err := os.WriteFile(filepath.Join(d, "components", "example", "component.json"), []byte(manifest), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := Run([]string{"validate"}); err == nil {
+			t.Fatal("expected missing secret namespace validation error")
+		}
+	}
 	if err := Run([]string{"init"}); err != nil {
 		t.Fatal(err)
 	}

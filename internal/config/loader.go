@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,19 @@ func Validate(reg *Registry) error {
 		}
 		if forge.URL == "" {
 			return fmt.Errorf("%s: forge %q missing url", reg.Path, alias)
+		}
+		t := strings.ToLower(strings.TrimSpace(forge.Type))
+		switch t {
+		case "github", "gitlab", "forgejo", "gitea":
+		default:
+			return fmt.Errorf("%s: forge %q has unsupported type %q", reg.Path, alias, forge.Type)
+		}
+		u, err := url.Parse(forge.URL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("%s: forge %q has invalid url %q", reg.Path, alias, forge.URL)
+		}
+		if forge.Auth != nil && strings.TrimSpace(forge.Auth.Secret) == "" {
+			return fmt.Errorf("%s: forge %q has invalid auth.secret", reg.Path, alias)
 		}
 	}
 	return nil

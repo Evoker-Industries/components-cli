@@ -11,6 +11,25 @@ func TestSecretsSetListRemove(t *testing.T) {
 	if err := Init(p, true); err != nil {
 		t.Fatal(err)
 	}
+
+	func TestLookupEnvPrecedence(t *testing.T) {
+		p := filepath.Join(t.TempDir(), ".secrets.json")
+		if err := Init(p, true); err != nil {
+			t.Fatal(err)
+		}
+		s, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Set("github.token", "file-token"); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("COMPONENTS_SECRET_GITHUB_TOKEN", "env-token")
+		v, ok := s.Lookup("github", "token")
+		if !ok || v != "env-token" {
+			t.Fatalf("expected env override, got ok=%v v=%q", ok, v)
+		}
+	}
 	s, err := Load(p)
 	if err != nil {
 		t.Fatal(err)
