@@ -488,6 +488,8 @@ Implement a Go CLI named `components`.
 Required commands:
 
 ```bash
+components init
+components add <name> <source>
 components validate
 components list
 components show <name>
@@ -498,6 +500,9 @@ components update <name>
 components current <name>
 components rollback <name>
 components clean
+components secret set <name> <value>
+components secret list
+components secret remove <name>
 ```
 
 Required options:
@@ -506,23 +511,185 @@ Required options:
 --file <path>
 --storage <path>
 --lock <path>
+--secrets <path>
 --offline
 --verbose
 ```
 
-Examples:
-
-```bash
-components --file registry.json validate
-components --file registry.json list
-components --file registry.json check
-components --file registry.json install Example
-components --storage ./vendor/components update
-```
-
 The CLI must use configured paths and must not assume repository-specific directories.
 
-### 13. Go package layout
+#### `init` command
+
+`components init` must initialize a new component registry in the selected directory.
+
+Expected behavior:
+
+1. Create the root registry file if it does not exist.
+2. Create an empty `components` object.
+3. Create an empty `forges` object.
+4. Create a secrets file or secrets directory using the configured secrets path.
+5. Add the secrets path to `.gitignore`.
+6. Create a default lock file if requested or required by the selected configuration.
+7. Refuse to overwrite existing files unless an explicit `--force` option is supplied.
+8. Use relative paths where possible so the registry remains portable.
+
+Example:
+
+```bash
+components init
+components init --file config/components.json --storage .cache/components
+```
+
+#### `add` command
+
+`components add` must make adding a component easy without requiring manual JSON editing.
+
+Example:
+
+```bash
+components add Ruffle github://ruffle-rs/ruffle
+components add Ionicons unpkg://ionic-team/ionicons --version 7.1.0
+components add InternalTools company://platform/internal-tools --path vendor/internal-tools
+```
+
+Supported options should include:
+
+```bash
+--version <version>
+--path <manifest-path>
+--directory <storage-directory>
+--forge <alias>
+--yes
+```
+
+The command must:
+
+1. Validate the component name.
+2. Validate and parse the source URI.
+3. Load the existing root registry.
+4. Reject duplicate component names unless `--force` is provided.
+5. Create a component manifest at the requested or generated path.
+6. Add a root registry entry with a relative `ref`.
+7. Preserve existing formatting and entries as much as practical.
+8. Write registry and manifest files atomically.
+9. Optionally install the component when `--install` is supplied.
+10. Never place credentials in the generated component manifest.
+
+The command must not derive paths from a hardcoded `lib/` convention. If no manifest path is supplied, use a configurable default template such as `<components-directory>/<safe-name>/component.json`.
+
+Example generated manifest:
+
+```json
+{
+  "component": {
+    "name": "Ruffle",
+    "source": "github://ruffle-rs/ruffle",
+    "version": "latest",
+    "directory": "."
+  }
+}
+```
+
+Example generated root entry:
+
+```json
+{
+  "components": {
+    "Ruffle": {
+      "ref": "./components/ruffle/component.json"
+    }
+  }
+}
+```
+
+### 13. Secrets and authentication
+
+Provide a secure, local secrets feature for credentials required by GitHub, Forgejo, Gitea, GitLab, package registries, or private Git repositories.
+
+Secrets must not be stored in component manifests, the root registry, or the lock file.
+
+The secrets path must be configurable through `--secrets` and may default to a file such as:
+
+```text
+.components.secrets.json
+```
+
+The default secrets path must always be added to `.gitignore`. If the user selects a custom secrets path, that path must also be added to `.gitignore` unless the user explicitly disables this behavior.
+
+Recommended secrets format:
+
+```json
+{
+  "github": {
+    "token": "ghp_example"
+  },
+  "company": {
+    "token": "forgejo-token"
+  },
+  "private-git": {
+    "username": "git-user",
+    "password": "secret"
+  }
+}
+```
+
+The implementation must:
+
+- Create the secrets file with restrictive permissions, such as `0600` on Unix-like systems.
+- Refuse to use a secrets file that is group/world writable unless explicitly overridden.
+- Never print secret values.
+- Redact tokens and passwords from logs and error messages.
+- Use secrets only at runtime to construct authenticated requests or Git credentials.
+- Keep secrets out of generated manifests and lock files.
+- Support environment variables as an optional higher-precedence source.
+- Make it possible to use different credentials for different forge aliases.
+- Preserve unknown secret fields when updating the file.
+- Write the secrets file atomically.
+
+Recommended commands:
+
+```bash
+components secret set github.token
+components secret set company.token
+components secret set private-git.username
+components secret set private-git.password
+components secret list
+components secret remove company.token
+```
+
+`secret set` should prompt interactively when no value is supplied, and should avoid accepting secrets through shell arguments by default. A non-interactive option may read from standard input or an environment variable.
+
+`secret list` must show only names, never values:
+
+```text
+github.token
+company.token
+private-git.username
+private-git.password
+```
+
+Forge configuration may reference a secret namespace without embedding credentials:
+
+```json
+{
+  "forges": {
+    "company": {
+      "type": "forgejo",
+      "url": "https://git.company.example",
+      "api": "https://git.company.example/api/v1",
+      "auth": {
+        "secret": "company"
+      }
+    }
+  }
+}
+```
+
+The loader must resolve `auth.secret` against the local secrets store at runtime.
+
+GitHub should support token-based API authentication. Forgejo, Gitea, and GitLab should support configured token authentication. Direct Git sources should support the selected secure Git credential mechanism without writing credentials into clone URLs.
+
+### 14. Go package layout
 
 Use a maintainable package structure similar to:
 
@@ -563,21 +730,33 @@ internal/
 ├── lockfile/
 │   ├── loader.go
 │   └── writer.go
+├── secrets/
+│   ├── store.go
+│   ├── file.go
+│   ├── permissions.go
+│   └── redact.go
+├── initcmd/
+│   └── init.go
+├── addcmd/
+│   └── add.go
 ├── validation/
 │   ├── config.go
 │   ├── files.go
 │   └── archive.go
 └── cli/
+    ├── init.go
+    ├── add.go
     ├── validate.go
     ├── list.go
     ├── check.go
     ├── install.go
+    ├── secret.go
     └── update.go
 ```
 
 The agent may adjust the package layout if the repository has an established Go structure.
 
-### 14. Configuration validation
+### 15. Configuration validation
 
 Validation must detect:
 
@@ -595,6 +774,8 @@ Validation must detect:
 - Unsafe paths.
 - Unsupported source schemes.
 - Duplicate forge aliases.
+- Invalid secret references.
+- Secrets paths that are not ignored by Git.
 
 Errors must identify the relevant file and JSON field. For example:
 
@@ -602,11 +783,11 @@ Errors must identify the relevant file and JSON field. For example:
 component "Example": both "ver" and "version" are present with different values
 ```
 
-### 15. Security requirements
+### 16. Security requirements
 
 - Never store credentials in JSON manifests.
-- Read authentication tokens from environment variables or a credential provider.
-- Redact credentials from logs.
+- Read authentication tokens from the local secrets store or environment variables.
+- Redact credentials from logs and errors.
 - Use HTTPS by default for HTTP sources.
 - Do not execute commands defined by JSON.
 - Do not allow arbitrary shell hooks in component manifests.
@@ -615,8 +796,11 @@ component "Example": both "ver" and "version" are present with different values
 - Use context cancellation for network and Git operations.
 - Apply HTTP timeouts.
 - Stream large downloads instead of loading them entirely into memory.
+- Create secrets files with restrictive permissions.
+- Ensure secrets files are ignored by Git.
+- Do not pass credentials in repository URLs or command-line arguments.
 
-### 16. Testing requirements
+### 17. Testing requirements
 
 Add unit tests for:
 
@@ -637,6 +821,16 @@ Add unit tests for:
 - Path traversal protection.
 - Atomic lock file writes.
 - Version comparison.
+- `init` file creation.
+- `init` refusal to overwrite without `--force`.
+- `add` manifest generation.
+- `add` root registry updates.
+- Duplicate component handling.
+- Relative path generation.
+- Secrets serialization.
+- Secrets file permissions.
+- Secret redaction.
+- `.gitignore` updates.
 
 Add integration tests using `httptest.Server` for:
 
@@ -644,11 +838,12 @@ Add integration tests using `httptest.Server` for:
 - Release discovery.
 - Artifact downloads.
 - Failed downloads.
-- Authentication.
+- Authentication headers.
 - Retry behavior.
 - Offline mode.
+- Secret lookup by forge alias.
 
-Add end-to-end tests using temporary directories and temporary registry files. Test manifest paths in multiple arbitrary locations to ensure the implementation does not depend on `lib/`.
+Add end-to-end tests using temporary directories and temporary registry files. Test manifest paths in multiple arbitrary locations to ensure the implementation does not depend on `lib/`. Test initialization and adding components in an empty directory, an existing registry, and a registry with custom forge aliases.
 
 ---
 
@@ -672,9 +867,17 @@ The implementation is complete when:
 14. Failed updates do not replace the current version.
 15. Offline commands work for already-installed components.
 16. Unsafe archive paths are rejected.
-17. Tests cover arbitrary manifest locations and do not rely on example component names.
-18. `go test ./...` passes.
-19. The CLI builds successfully with:
+17. `components init` creates a usable new registry without overwriting files by default.
+18. `components add` creates a component manifest and registers it using a relative `ref`.
+19. `components add` works with arbitrary manifest paths and does not assume `lib/`.
+20. Secrets can be added, listed by name, and removed through CLI commands.
+21. Secrets are stored outside manifests and lock files in a locally ignored file.
+22. Secrets files use restrictive permissions and are atomically updated.
+23. GitHub, Forgejo, Gitea, GitLab, and private Git authentication can use configured secrets.
+24. Secrets never appear in logs, command output, generated files, or repository URLs.
+25. Tests cover arbitrary manifest locations and do not rely on example component names.
+26. `go test ./...` passes.
+27. The CLI builds successfully with:
 
 ```bash
 go build ./cmd/components
