@@ -4,11 +4,11 @@
 
 ### Objective
 
-Implement a Go-based JSON component registry and offline updater.
+Implement a Go-based JSON component registry and offline updater with extensible adapter support and plugin architecture.
 
 The system manages offline copies of external components. Each component is defined by a JSON manifest. A root registry JSON file references component manifests and defines reusable source and forge configurations.
 
-The implementation must be generic. Do not hardcode component names, directories, repository paths, or an assumed `lib/` directory. Component manifest paths must come from the root registry configuration.
+The implementation must be generic, extensible through adapters and plugins, and support language-specific package registries. Do not hardcode component names, directories, repository paths, or an assumed `lib/` directory. Component manifest paths must come from the root registry configuration.
 
 The system should support source identifiers such as:
 
@@ -19,6 +19,15 @@ gitea://instance-alias/owner/repository
 gitlab://instance-alias/owner/repository
 npm://package-name
 unpkg://package-name
+pypi://package-name
+cargo://crate-name
+nuget://package-name
+maven://group-id:artifact-id
+composer://vendor/package
+gem://gem-name
+pub://package-name
+crates-io://crate-name
+custom://adapter-name:target
 git+https://git.example.com/owner/repository.git
 ```
 
@@ -96,6 +105,24 @@ and:
 ```json
 {
   "Components": {
+    "Example": {
+      "ref": "./some/path/component.json"
+    }
+  }
+}
+```
+
+The root registry may also define custom adapters:
+
+```json
+{
+  "adapters": {
+    "custom-adapter": {
+      "type": "plugin",
+      "source": "./plugins/custom-adapter.so"
+    }
+  },
+  "components": {
     "Example": {
       "ref": "./some/path/component.json"
     }
@@ -286,6 +313,12 @@ Create adapter interfaces for package sources:
 npm://
 unpkg://
 pypi://
+cargo://
+nuget://
+maven://
+composer://
+gem://
+pub://
 ```
 
 The first implementation may focus on source parsing and Git-based sources, but unsupported adapters must return clear errors instead of silently treating them as Git repositories.
@@ -298,53 +331,308 @@ url://https://example.com/archive.tar.gz
 
 Keep direct URL behavior separate from forge behavior.
 
-### 6. Forge adapters
+### 6. Adapter architecture
 
-Create a common interface for forge providers:
+The system must support three types of adapters:
 
-```go
-type ForgeAdapter interface {
-    Type() string
+#### 6.1 Built-in adapters
 
-    RepositoryURL(
-        config ForgeConfig,
-        repository string,
-    ) string
+Implement as Go code directly in the binary.
 
-    CloneURL(
-        config ForgeConfig,
-        repository string,
-    ) string
-
-    ListVersions(
-        ctx context.Context,
-        source ResolvedSource,
-    ) ([]Version, error)
-
-    ResolveVersion(
-        ctx context.Context,
-        source ResolvedSource,
-        requested string,
-    ) (ResolvedVersion, error)
-}
-```
-
-Implement adapters for:
+Forge adapters:
 
 - GitHub
 - GitLab
 - Forgejo
 - Gitea
 
-Forgejo and Gitea may share implementation details, but register them as separate provider types. Custom hosts must work through root configuration.
+Package registry adapters:
 
-### 7. Version resolution
+- npm / unpkg (JavaScript/Node.js)
+- PyPI (Python)
+- Cargo / crates.io (Rust)
+- NuGet (.NET)
+- Maven (Java)
+- Composer (PHP)
+- RubyGems (Ruby)
+- pub.dev (Dart)
+
+#### 6.2 Plugin adapters
+
+Load external adapters from compiled shared object files (`.so` on Unix, `.dll` on Windows).
+
+Define a plugin interface:
+
+```go
+type PluginAdapter interface {
+    Name() string
+    Version() string
+    Type() string
+    Capabilities() []string
+    Initialize(config map[string]interface{}) error
+    Resolve(ctx context.Context, source ResolvedSource, version string) (ResolvedVersion, error)
+    ListVersions(ctx context.Context, source ResolvedSource) ([]Version, error)
+}
+```
+
+Plugins must implement a well-defined export function:
+
+```c
+// Expected C export that Go plugins must provide
+extern PluginAdapter* NewAdapter(void);
+```
+
+Plugins can be registered in the root registry configuration:
+
+```json
+{
+  "adapters": {
+    "my-private-registry": {
+      "type": "plugin",
+      "source": "./plugins/my-private-registry.so",
+      "config": {
+        "url": "https://private-registry.example.com",
+        "auth": {
+          "secret": "private-registry"
+        }
+      }
+    }
+  }
+}
+```
+
+#### 6.3 HTTP-based adapters
+
+Support remote adapters that expose an HTTP API.
+
+Define an HTTP adapter contract:
+
+```json
+{
+  "type": "http",
+  "url": "http://localhost:9999",
+  "operations": {
+    "list-versions": "GET /versions/{namespace}/{name}",
+    "resolve-version": "GET /resolve/{namespace}/{name}/{version}",
+    "download": "GET /download/{namespace}/{name}/{version}"
+  }
+}
+```
+
+Register in root config:
+
+```json
+{
+  "adapters": {
+    "remote-registry": {
+      "type": "http",
+      "url": "https://adapter-service.example.com",
+      "timeout": "30s",
+      "auth": {
+        "secret": "remote-registry"
+      }
+    }
+  }
+}
+```
+
+### 7. Common adapter interface
+
+Create a unified interface for all adapters:
+
+```go
+type SourceAdapter interface {
+    Type() string
+    Name() string
+    
+    RepositoryURL(
+        config SourceConfig,
+        repository string,
+    ) string
+    
+    CloneURL(
+        config SourceConfig,
+        repository string,
+    ) string
+    
+    ListVersions(
+        ctx context.Context,
+        source ResolvedSource,
+    ) ([]Version, error)
+    
+    ResolveVersion(
+        ctx context.Context,
+        source ResolvedSource,
+        requested string,
+    ) (ResolvedVersion, error)
+    
+    DownloadArtifact(
+        ctx context.Context,
+        source ResolvedSource,
+        version ResolvedVersion,
+        destination string,
+    ) error
+    
+    Capabilities() []string
+}
+```
+
+The interface must support:
+
+- Version discovery.
+- Version resolution.
+- Artifact download.
+- Metadata retrieval.
+- Authentication.
+- Custom configuration.
+
+### 8. Language-specific package registry adapters
+
+Each major language registry must be supported through a dedicated adapter.
+
+#### 8.1 npm / unpkg (JavaScript/Node.js)
+
+```bash
+npm://lodash
+npm://lodash@4.17.21
+unpkg://react
+```
+
+- Resolve from npm registry (https://registry.npmjs.org).
+- Support version ranges.
+- Download tarballs from npm CDN.
+
+#### 8.2 PyPI (Python)
+
+```bash
+pypi://requests
+pypi://django@3.2.0
+```
+
+- Query PyPI JSON API.
+- Support semantic versioning.
+- Download wheels or source distributions.
+
+#### 8.3 Cargo / crates.io (Rust)
+
+```bash
+cargo://serde
+cargo://tokio@1.0.0
+crates-io://regex
+```
+
+- Query crates.io API.
+- Download crate archives.
+
+#### 8.4 NuGet (.NET)
+
+```bash
+nuget://Newtonsoft.Json
+nuget://EntityFramework@6.4.4
+```
+
+- Query nuget.org API.
+- Download packages.
+
+#### 8.5 Maven (Java)
+
+```bash
+maven://org.slf4j:slf4j-api
+maven://com.google.guava:guava@30.0
+```
+
+- Query Maven Central Repository.
+- Support version resolution.
+- Download JARs.
+
+#### 8.6 Composer (PHP)
+
+```bash
+composer://laravel/framework
+composer://symfony/console@5.0.0
+```
+
+- Query Packagist API.
+- Download packages.
+
+#### 8.7 RubyGems (Ruby)
+
+```bash
+gem://rails
+gem://sinatra@2.1.0
+```
+
+- Query rubygems.org API.
+- Download gems.
+
+#### 8.8 pub.dev (Dart)
+
+```bash
+pub://provider
+pub://flutter@latest
+```
+
+- Query pub.dev API.
+- Download packages.
+
+Each adapter must:
+
+- Implement the unified `SourceAdapter` interface.
+- Support version discovery and resolution.
+- Resolve package names to downloadable artifacts.
+- Record the source package name, version, and download URL in the lock file.
+- Validate downloaded artifacts when checksums are available.
+
+### 9. Plugin development guide
+
+To be included in documentation:
+
+- Example plugin structure and build process.
+- Required exports and function signatures.
+- Configuration schema for custom adapters.
+- Error handling and logging conventions.
+- Testing harness for plugins.
+- Example implementations for private registries.
+
+### 10. Adapter API and discovery
+
+The system must provide a queryable adapter registry:
+
+```bash
+components adapter list
+components adapter show <name>
+components adapter capabilities <name>
+```
+
+Output:
+
+```text
+NAME                    TYPE        CAPABILITIES
+github                  builtin     list-versions, resolve, clone, auth
+npm                     builtin     list-versions, resolve, download, auth
+pypi                    builtin     list-versions, resolve, download
+my-plugin               plugin      list-versions, resolve, download
+remote-registry         http        list-versions, resolve, download
+```
+
+The implementation must:
+
+- Enumerate all loaded adapters.
+- Report adapter capabilities.
+- Show configuration requirements.
+- Validate adapter configuration.
+- Report adapter-specific errors clearly.
+
+### 11. Version resolution
 
 Support these version forms:
 
 ```text
 1.2.3
 v1.2.3
+^1.2.3
+~1.2.3
+>=1.2.0 <2.0.0
 latest
 stable
 nightly
@@ -358,7 +646,7 @@ Do not assume every source uses semantic versioning.
 
 Store both the requested version and the resolved version or commit. For Git sources, record the final commit SHA. For release-based sources, record the release ID when available, release tag, published timestamp, and selected asset.
 
-### 8. Offline storage
+### 12. Offline storage
 
 Store each installed version in an immutable version-specific directory. The storage root must be configurable.
 
@@ -376,7 +664,7 @@ Safely normalize component names before using them as filesystem paths. Never ov
 
 The `current` marker may be implemented as a symlink, a text file containing the active version, or an internal metadata record. Hide platform-specific behavior behind the storage implementation.
 
-### 9. Lock file
+### 13. Lock file
 
 Maintain a lock file containing exact resolved state. Its path must be configurable; `components.lock.json` is a suitable default.
 
@@ -392,6 +680,7 @@ Example:
       "requestedVersion": "0.6.0",
       "resolvedVersion": "0.6.0",
       "commit": "abcdef1234567890",
+      "adapter": "github",
       "path": "stored/example/0.6.0",
       "verified": true,
       "files": [
@@ -407,12 +696,14 @@ Example:
 
 Write the lock file atomically. Do not update it until download, verification, and validation succeed.
 
-### 10. Download and installation lifecycle
+### 14. Download and installation lifecycle
 
 Use this lifecycle:
 
 ```text
 Load root registry
+    ↓
+Load adapters (built-in, plugins, HTTP)
     ↓
 Load component manifest
     ↓
@@ -420,7 +711,7 @@ Parse source URI
     ↓
 Resolve source adapter
     ↓
-Resolve requested version
+Resolve requested version using adapter
     ↓
 Download or clone into staging directory
     ↓
@@ -444,7 +735,7 @@ If any step fails:
 - Remove or retain staging data according to a cleanup option.
 - Return a non-zero exit status.
 
-### 11. Verification and validation
+### 15. Verification and validation
 
 Support SHA-256 verification. At minimum, record hashes for installed files in the generated manifest.
 
@@ -481,7 +772,7 @@ Support optional validation such as:
 
 The validation system must not assume any particular component or filename.
 
-### 12. CLI
+### 16. CLI
 
 Implement a Go CLI named `components`.
 
@@ -503,6 +794,9 @@ components clean
 components secret set <name> <value>
 components secret list
 components secret remove <name>
+components adapter list
+components adapter show <name>
+components adapter capabilities <name>
 ```
 
 Required options:
@@ -512,6 +806,7 @@ Required options:
 --storage <path>
 --lock <path>
 --secrets <path>
+--plugins-dir <path>
 --offline
 --verbose
 ```
@@ -527,17 +822,18 @@ Expected behavior:
 1. Create the root registry file if it does not exist.
 2. Create an empty `components` object.
 3. Create an empty `forges` object.
-4. Create a secrets file or secrets directory using the configured secrets path.
-5. Add the secrets path to `.gitignore`.
-6. Create a default lock file if requested or required by the selected configuration.
-7. Refuse to overwrite existing files unless an explicit `--force` option is supplied.
-8. Use relative paths where possible so the registry remains portable.
+4. Create an empty `adapters` object.
+5. Create a secrets file or secrets directory using the configured secrets path.
+6. Add the secrets path to `.gitignore`.
+7. Create a default lock file if requested or required by the selected configuration.
+8. Refuse to overwrite existing files unless an explicit `--force` option is supplied.
+9. Use relative paths where possible so the registry remains portable.
 
 Example:
 
 ```bash
 components init
-components init --file config/components.json --storage .cache/components
+components init --file config/components.json --storage .cache/components --plugins-dir ./plugins
 ```
 
 #### `add` command
@@ -548,8 +844,9 @@ Example:
 
 ```bash
 components add Ruffle github://ruffle-rs/ruffle
-components add Ionicons unpkg://ionic-team/ionicons --version 7.1.0
+components add Ionicons npm://ionicons --version 7.1.0
 components add InternalTools company://platform/internal-tools --path vendor/internal-tools
+components add Django pypi://django --version 4.0.0
 ```
 
 Supported options should include:
@@ -566,7 +863,7 @@ The command must:
 
 1. Validate the component name.
 2. Validate and parse the source URI.
-3. Load the existing root registry.
+3. Load the existing root registry and adapters.
 4. Reject duplicate component names unless `--force` is provided.
 5. Create a component manifest at the requested or generated path.
 6. Add a root registry entry with a relative `ref`.
@@ -602,7 +899,7 @@ Example generated root entry:
 }
 ```
 
-### 13. Secrets and authentication
+### 17. Secrets and authentication
 
 Provide a secure, local secrets feature for credentials required by GitHub, Forgejo, Gitea, GitLab, package registries, or private Git repositories.
 
@@ -625,6 +922,13 @@ Recommended secrets format:
   },
   "company": {
     "token": "forgejo-token"
+  },
+  "pypi": {
+    "username": "myuser",
+    "password": "secret"
+  },
+  "npm": {
+    "token": "npm-token"
   },
   "private-git": {
     "username": "git-user",
@@ -650,9 +954,8 @@ Recommended commands:
 
 ```bash
 components secret set github.token
-components secret set company.token
-components secret set private-git.username
-components secret set private-git.password
+components secret set pypi.username
+components secret set npm.token
 components secret list
 components secret remove company.token
 ```
@@ -663,9 +966,8 @@ components secret remove company.token
 
 ```text
 github.token
-company.token
-private-git.username
-private-git.password
+pypi.username
+npm.token
 ```
 
 Forge configuration may reference a secret namespace without embedding credentials:
@@ -687,9 +989,9 @@ Forge configuration may reference a secret namespace without embedding credentia
 
 The loader must resolve `auth.secret` against the local secrets store at runtime.
 
-GitHub should support token-based API authentication. Forgejo, Gitea, and GitLab should support configured token authentication. Direct Git sources should support the selected secure Git credential mechanism without writing credentials into clone URLs.
+Package registry adapters should support configured token authentication. Direct Git sources should support the selected secure Git credential mechanism without writing credentials into clone URLs.
 
-### 14. Go package layout
+### 18. Go package layout
 
 Use a maintainable package structure similar to:
 
@@ -711,13 +1013,29 @@ internal/
 │   ├── parser.go
 │   ├── resolver.go
 │   └── types.go
-├── forge/
-│   ├── adapter.go
+├── adapter/
+│   ├── interface.go
 │   ├── registry.go
-│   ├── github.go
-│   ├── gitlab.go
-│   ├── forgejo.go
-│   └── gitea.go
+│   ├── loader.go
+│   ├── builtin/
+│   │   ├── github.go
+│   │   ├── gitlab.go
+│   │   ├── forgejo.go
+│   │   ├── gitea.go
+│   │   ├── npm.go
+│   │   ├── pypi.go
+│   │   ├── cargo.go
+│   │   ├── nuget.go
+│   │   ├── maven.go
+│   │   ├── composer.go
+│   │   ├── gem.go
+│   │   └── pub.go
+│   ├── plugin/
+│   │   ├── loader.go
+│   │   ├── interface.go
+│   │   └── sandbox.go
+│   └── http/
+│       └── remote.go
 ├── downloader/
 │   ├── http.go
 │   ├── git.go
@@ -750,13 +1068,18 @@ internal/
     ├── list.go
     ├── check.go
     ├── install.go
+    ├── adapter.go
     ├── secret.go
     └── update.go
+
+pkg/
+└── adapter/
+    └── api.go
 ```
 
 The agent may adjust the package layout if the repository has an established Go structure.
 
-### 15. Configuration validation
+### 19. Configuration validation
 
 Validation must detect:
 
@@ -776,19 +1099,23 @@ Validation must detect:
 - Duplicate forge aliases.
 - Invalid secret references.
 - Secrets paths that are not ignored by Git.
+- Missing plugin files.
+- Invalid plugin configuration.
+- Unavailable HTTP adapters.
 
 Errors must identify the relevant file and JSON field. For example:
 
 ```text
 component "Example": both "ver" and "version" are present with different values
+adapter "my-plugin": plugin file not found at ./plugins/my-plugin.so
 ```
 
-### 16. Security requirements
+### 20. Security requirements
 
 - Never store credentials in JSON manifests.
 - Read authentication tokens from the local secrets store or environment variables.
 - Redact credentials from logs and errors.
-- Use HTTPS by default for HTTP sources.
+- Use HTTPS by default for HTTP sources and HTTP adapters.
 - Do not execute commands defined by JSON.
 - Do not allow arbitrary shell hooks in component manifests.
 - Prevent archive path traversal.
@@ -799,8 +1126,54 @@ component "Example": both "ver" and "version" are present with different values
 - Create secrets files with restrictive permissions.
 - Ensure secrets files are ignored by Git.
 - Do not pass credentials in repository URLs or command-line arguments.
+- Sandbox plugin execution to prevent filesystem escape.
+- Validate plugin signatures when available.
+- Apply resource limits to plugin operations (memory, time, network).
 
-### 17. Testing requirements
+### 21. Adapter extension point
+
+The system must provide a public API for custom adapter development:
+
+```bash
+go get github.com/Evoker-Industries/components-cli/pkg/adapter
+```
+
+Example custom adapter skeleton:
+
+```go
+package main
+
+import (
+    "github.com/Evoker-Industries/components-cli/pkg/adapter"
+)
+
+type MyAdapter struct {
+    config map[string]interface{}
+}
+
+func (a *MyAdapter) Name() string { return "my-registry" }
+func (a *MyAdapter) Type() string { return "plugin" }
+func (a *MyAdapter) Capabilities() []string {
+    return []string{"list-versions", "resolve", "download"}
+}
+
+func (a *MyAdapter) Initialize(cfg map[string]interface{}) error {
+    a.config = cfg
+    return nil
+}
+
+// Implement remaining methods...
+
+var AdapterInstance = &MyAdapter{}
+```
+
+Build as a plugin:
+
+```bash
+go build -o my-registry.so -buildmode=plugin .
+```
+
+### 22. Testing requirements
 
 Add unit tests for:
 
@@ -813,10 +1186,10 @@ Add unit tests for:
 - Source URI parsing.
 - Forge alias resolution.
 - Custom forge hosts.
-- GitHub URL generation.
-- Forgejo URL generation.
-- Gitea URL generation.
-- GitLab URL generation.
+- Adapter registration and discovery.
+- Adapter capability reporting.
+- Plugin loading and initialization.
+- HTTP adapter negotiation.
 - Unsupported source handling.
 - Path traversal protection.
 - Atomic lock file writes.
@@ -835,6 +1208,7 @@ Add unit tests for:
 Add integration tests using `httptest.Server` for:
 
 - Forge API responses.
+- Package registry API responses (npm, PyPI, Cargo, etc.).
 - Release discovery.
 - Artifact downloads.
 - Failed downloads.
@@ -842,8 +1216,22 @@ Add integration tests using `httptest.Server` for:
 - Retry behavior.
 - Offline mode.
 - Secret lookup by forge alias.
+- Plugin lifecycle.
+- HTTP adapter communication.
 
-Add end-to-end tests using temporary directories and temporary registry files. Test manifest paths in multiple arbitrary locations to ensure the implementation does not depend on `lib/`. Test initialization and adding components in an empty directory, an existing registry, and a registry with custom forge aliases.
+Add end-to-end tests using temporary directories and temporary registry files. Test manifest paths in multiple arbitrary locations to ensure the implementation does not depend on `lib/`. Test initialization, adding components with various adapters, and loading plugins.
+
+### 23. Built-in adapter test requirements
+
+Each built-in adapter must have comprehensive tests including:
+
+- Version discovery.
+- Version resolution.
+- Artifact download.
+- Error handling for network failures.
+- Authentication handling.
+- Metadata extraction.
+- Cache-friendly requests.
 
 ---
 
@@ -860,25 +1248,40 @@ The implementation is complete when:
 7. Custom Forgejo, Gitea, and GitLab hosts work through configuration.
 8. Source strings are parsed through a generic URI parser.
 9. GitHub, GitLab, Forgejo, and Gitea adapters are implemented.
-10. Direct Git URLs are supported.
-11. Components can be downloaded or cloned into configurable storage.
-12. Installed versions are immutable.
-13. A lock file records resolved versions and checksums.
-14. Failed updates do not replace the current version.
-15. Offline commands work for already-installed components.
-16. Unsafe archive paths are rejected.
-17. `components init` creates a usable new registry without overwriting files by default.
-18. `components add` creates a component manifest and registers it using a relative `ref`.
-19. `components add` works with arbitrary manifest paths and does not assume `lib/`.
-20. Secrets can be added, listed by name, and removed through CLI commands.
-21. Secrets are stored outside manifests and lock files in a locally ignored file.
-22. Secrets files use restrictive permissions and are atomically updated.
-23. GitHub, Forgejo, Gitea, GitLab, and private Git authentication can use configured secrets.
-24. Secrets never appear in logs, command output, generated files, or repository URLs.
-25. Tests cover arbitrary manifest locations and do not rely on example component names.
-26. `go test ./...` passes.
-27. The CLI builds successfully with:
+10. npm, PyPI, Cargo, NuGet, Maven, Composer, RubyGems, and pub.dev adapters are implemented.
+11. Direct Git URLs are supported.
+12. Components can be downloaded or cloned into configurable storage.
+13. Installed versions are immutable.
+14. A lock file records resolved versions, checksums, and adapter information.
+15. Failed updates do not replace the current version.
+16. Offline commands work for already-installed components.
+17. Unsafe archive paths are rejected.
+18. `components init` creates a usable new registry without overwriting files by default.
+19. `components add` creates a component manifest and registers it using a relative `ref`.
+20. `components add` works with arbitrary manifest paths and does not assume `lib/`.
+21. Secrets can be added, listed by name, and removed through CLI commands.
+22. Secrets are stored outside manifests and lock files in a locally ignored file.
+23. Secrets files use restrictive permissions and are atomically updated.
+24. All major language package registries support authenticated requests through secrets.
+25. Secrets never appear in logs, command output, generated files, or repository URLs.
+26. Plugin adapters can be loaded from `.so` files and configured in the root registry.
+27. HTTP adapters can be discovered and used for remote adapter implementations.
+28. `components adapter list`, `components adapter show`, and `components adapter capabilities` work.
+29. Custom adapters can be developed using the public API and packaged as plugins.
+30. Adapters are registered and resolved dynamically based on source URI scheme.
+31. The lock file includes the adapter name for each installed component.
+32. Tests cover arbitrary manifest locations, adapters, and plugins.
+33. `go test ./...` passes.
+34. The CLI builds successfully with:
 
 ```bash
 go build ./cmd/components
 ```
+
+35. The public adapter API is available via:
+
+```bash
+go get github.com/Evoker-Industries/components-cli/pkg/adapter
+```
+
+36. Documentation includes example custom adapter implementations.
