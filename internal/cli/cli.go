@@ -276,20 +276,36 @@ func runInstall(opts Options, args []string) error {
 		return errors.New("offline mode requires an already installed component")
 	}
 	fs := storage.FS{Root: opts.Storage}
-	installPath, err := fs.InstallVersion(name, resolvedVersion)
+	stagingPath, err := fs.BeginStaging(name, resolvedVersion)
 	if err != nil {
 		return err
 	}
+	promoted := false
+	defer func() {
+		if !promoted {
+			_ = os.RemoveAll(stagingPath)
+		}
+	}()
 	metadata := fmt.Sprintf("source=%s\nclone=%s\n", comp.Source, resolved.CloneURL)
-	if err := os.WriteFile(filepath.Join(installPath, "manifest.txt"), []byte(metadata), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(stagingPath, "manifest.txt"), []byte(metadata), 0o644); err != nil {
 		return err
 	}
-	if err := fs.SetCurrent(name, resolvedVersion); err != nil {
+	installPath, err := fs.PromoteStaging(stagingPath, name, resolvedVersion)
+	if err != nil {
+		return err
+	}
+	promoted = true
+	checksums, err := util.DirectoryChecksums(installPath)
+	if err != nil {
 		return err
 	}
 	lf, err := lockfile.Load(opts.Lock)
 	if err != nil {
 		return err
+	}
+	files := make([]lockfile.FileHash, 0, len(checksums))
+	for _, csum := range checksums {
+		files = append(files, lockfile.FileHash{Path: csum.Path, SHA256: csum.SHA256})
 	}
 	lf.Components[name] = lockfile.ComponentLock{
 		Source:           comp.Source,
@@ -297,8 +313,12 @@ func runInstall(opts Options, args []string) error {
 		ResolvedVersion:  resolvedVersion,
 		Path:             installPath,
 		Verified:         true,
+		Files:            files,
 	}
-	return lockfile.Write(opts.Lock, lf)
+	if err := lockfile.Write(opts.Lock, lf); err != nil {
+		return err
+	}
+	return fs.SetCurrent(name, resolvedVersion)
 }
 
 func runUpdate(opts Options, args []string) error {

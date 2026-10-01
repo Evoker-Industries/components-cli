@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +42,30 @@ func (fs FS) InstallVersion(name, version string) (string, error) {
 		return "", err
 	}
 	return vp, nil
+}
+
+func (fs FS) BeginStaging(name, version string) (string, error) {
+	stageRoot := filepath.Join(fs.Root, ".staging", SafeName(name))
+	if err := os.MkdirAll(stageRoot, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(stageRoot, version+"-")
+}
+
+func (fs FS) PromoteStaging(stagingPath, name, version string) (string, error) {
+	dest := fs.VersionPath(name, version)
+	if _, err := os.Stat(dest); err == nil {
+		return "", fmt.Errorf("version already installed: %s", dest)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Rename(stagingPath, dest); err != nil {
+		return "", err
+	}
+	return dest, nil
 }
 
 func (fs FS) SetCurrent(name, version string) error {
