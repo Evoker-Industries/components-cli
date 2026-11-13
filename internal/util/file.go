@@ -69,6 +69,15 @@ func EnsureGitIgnoreEntry(repoDir, entry string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
+func GitIgnoreContains(content, entry string) bool {
+	for _, line := range splitLines(content) {
+		if line == entry {
+			return true
+		}
+	}
+	return false
+}
+
 func splitLines(s string) []string {
 	out := []string{}
 	cur := ""
@@ -77,15 +86,6 @@ func splitLines(s string) []string {
 			out = append(out, cur)
 			cur = ""
 			continue
-		}
-
-		func GitIgnoreContains(content, entry string) bool {
-			for _, line := range splitLines(content) {
-				if line == entry {
-					return true
-				}
-			}
-			return false
 		}
 		if r != '\r' {
 			cur += string(r)

@@ -12,34 +12,6 @@ func TestLoadLegacyComponentsAndResolveRef(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	func TestValidateRejectsUnsupportedForgeType(t *testing.T) {
-		reg := &Registry{
-			Path:       "/tmp/components.json",
-			Dir:        "/tmp",
-			Components: map[string]ComponentRef{},
-			Forges: map[string]ForgeConfig{
-				"x": {Type: "unknown", URL: "https://example.com"},
-			},
-		}
-		if err := Validate(reg); err == nil {
-			t.Fatal("expected unsupported forge type error")
-		}
-	}
-
-	func TestValidateRejectsInvalidForgeURL(t *testing.T) {
-		reg := &Registry{
-			Path:       "/tmp/components.json",
-			Dir:        "/tmp",
-			Components: map[string]ComponentRef{},
-			Forges: map[string]ForgeConfig{
-				"x": {Type: "github", URL: "://bad"},
-			},
-		}
-		if err := Validate(reg); err == nil {
-			t.Fatal("expected invalid forge URL error")
-		}
-	}
 	if err := os.WriteFile(manifest, []byte(`{"component":{"name":"X","source":"github://o/r"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -56,5 +28,33 @@ func TestLoadLegacyComponentsAndResolveRef(t *testing.T) {
 	}
 	if got := ResolveRef(reg, reg.Components["X"].Ref); got != manifest {
 		t.Fatalf("resolve ref mismatch: %s", got)
+	}
+}
+
+func TestValidateRejectsUnsupportedForgeType(t *testing.T) {
+	reg := &Registry{
+		Path:       "/tmp/components.json",
+		Dir:        "/tmp",
+		Components: map[string]ComponentRef{},
+		Forges: map[string]ForgeConfig{
+			"x": {Type: "unknown", URL: "https://example.com"},
+		},
+	}
+	if err := Validate(reg); err == nil {
+		t.Fatal("expected unsupported forge type error")
+	}
+}
+
+func TestValidateRejectsInvalidForgeURL(t *testing.T) {
+	reg := &Registry{
+		Path:       "/tmp/components.json",
+		Dir:        "/tmp",
+		Components: map[string]ComponentRef{},
+		Forges: map[string]ForgeConfig{
+			"x": {Type: "github", URL: "://bad"},
+		},
+	}
+	if err := Validate(reg); err == nil {
+		t.Fatal("expected invalid forge URL error")
 	}
 }

@@ -52,6 +52,7 @@ func Run(args []string) error {
 	}
 	cmd := rest[0]
 	args = rest[1:]
+
 	switch cmd {
 	case "init":
 		return runInit(opts, args)
@@ -59,12 +60,12 @@ func Run(args []string) error {
 		return runAdd(opts, args)
 	case "validate":
 		return runValidate(opts)
-	case "check":
-		return runCheck(opts)
 	case "list":
 		return runList(opts)
 	case "show":
 		return runShow(opts, args)
+	case "check":
+		return runCheck(opts)
 	case "install":
 		return runInstall(opts, args)
 	case "update":
@@ -117,6 +118,8 @@ func runAdd(opts Options, args []string) error {
 	directory := f.String("directory", ".", "component directory")
 	force := f.Bool("force", false, "replace existing component")
 	installNow := f.Bool("install", false, "install immediately")
+	_ = f.String("forge", "", "forge alias override")
+	_ = f.Bool("yes", false, "assume yes")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -125,9 +128,13 @@ func runAdd(opts Options, args []string) error {
 	}
 	name := f.Arg(0)
 	src := f.Arg(1)
+	if strings.TrimSpace(name) == "" {
+		return errors.New("component name is required")
+	}
 	if _, err := source.Parse(src); err != nil {
 		return err
 	}
+
 	reg, err := config.Load(opts.File)
 	if err != nil {
 		return err
@@ -139,6 +146,7 @@ func runAdd(opts Options, args []string) error {
 		safe := storage.SafeName(name)
 		*manifestPath = filepath.Join(filepath.Dir(opts.File), "components", safe, "component.json")
 	}
+
 	manifestAbs, err := util.MustAbs(*manifestPath)
 	if err != nil {
 		return err
@@ -150,6 +158,7 @@ func runAdd(opts Options, args []string) error {
 	if err := component.Save(manifestAbs, comp); err != nil {
 		return err
 	}
+
 	regPathAbs, err := util.MustAbs(opts.File)
 	if err != nil {
 		return err
@@ -192,28 +201,6 @@ func runValidate(opts Options) error {
 	return nil
 }
 
-func runCheck(opts Options) error {
-	if err := runValidate(opts); err != nil {
-		return err
-	}
-	reg, _ := config.Load(opts.File)
-	fr := forge.NewRegistry()
-	for name, ref := range reg.Components {
-		comp, err := component.Load(config.ResolveRef(reg, ref.Ref))
-		if err != nil {
-			return err
-		}
-		uri, err := source.Parse(comp.Source)
-		if err != nil {
-			return fmt.Errorf("component %q: %w", name, err)
-		}
-		if _, err := fr.Resolve(uri, reg.Forges); err != nil {
-			return fmt.Errorf("component %q: %w", name, err)
-		}
-	}
-	return nil
-}
-
 func runList(opts Options) error {
 	reg, err := config.Load(opts.File)
 	if err != nil {
@@ -250,6 +237,31 @@ func runShow(opts Options, args []string) error {
 	return nil
 }
 
+func runCheck(opts Options) error {
+	if err := runValidate(opts); err != nil {
+		return err
+	}
+	reg, err := config.Load(opts.File)
+	if err != nil {
+		return err
+	}
+	fr := forge.NewRegistry()
+	for name, ref := range reg.Components {
+		comp, err := component.Load(config.ResolveRef(reg, ref.Ref))
+		if err != nil {
+			return err
+		}
+		uri, err := source.Parse(comp.Source)
+		if err != nil {
+			return fmt.Errorf("component %q: %w", name, err)
+		}
+		if _, err := fr.Resolve(uri, reg.Forges); err != nil {
+			return fmt.Errorf("component %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
 func runInstall(opts Options, args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: components install <name>")
@@ -281,19 +293,22 @@ func runInstall(opts Options, args []string) error {
 		requested = "latest"
 	}
 	resolvedVersion := requested
-	resolvedMeta, err := forgeRegistry.ResolveVersion(context.Background(), resolved, requested)
-	if err == nil {
-		if resolvedMeta.Value != "" {
-			resolvedVersion = resolvedMeta.Value
+	resolvedMeta := forge.ResolvedVersion{Value: requested}
+	if rv, err := forgeRegistry.ResolveVersion(context.Background(), resolved, requested); err == nil {
+		resolvedMeta = rv
+		if rv.Value != "" {
+			resolvedVersion = rv.Value
 		}
 	}
+
+	fs := storage.FS{Root: opts.Storage}
 	if opts.Offline {
-		if _, err := (storage.FS{Root: opts.Storage}).Current(name); err == nil {
+		if _, err := fs.Current(name); err == nil {
 			return nil
 		}
 		return errors.New("offline mode requires an already installed component")
 	}
-	fs := storage.FS{Root: opts.Storage}
+
 	stagingPath, err := fs.BeginStaging(name, resolvedVersion)
 	if err != nil {
 		return err
@@ -304,6 +319,7 @@ func runInstall(opts Options, args []string) error {
 			_ = os.RemoveAll(stagingPath)
 		}
 	}()
+
 	metadata := fmt.Sprintf("source=%s\nclone=%s\n", comp.Source, resolved.CloneURL)
 	if err := os.WriteFile(filepath.Join(stagingPath, "manifest.txt"), []byte(metadata), 0o644); err != nil {
 		return err
@@ -313,17 +329,19 @@ func runInstall(opts Options, args []string) error {
 		return err
 	}
 	promoted = true
+
 	checksums, err := util.DirectoryChecksums(installPath)
-	if err != nil {
-		return err
-	}
-	lf, err := lockfile.Load(opts.Lock)
 	if err != nil {
 		return err
 	}
 	files := make([]lockfile.FileHash, 0, len(checksums))
 	for _, csum := range checksums {
 		files = append(files, lockfile.FileHash{Path: csum.Path, SHA256: csum.SHA256})
+	}
+
+	lf, err := lockfile.Load(opts.Lock)
+	if err != nil {
+		return err
 	}
 	lf.Components[name] = lockfile.ComponentLock{
 		Source:           comp.Source,
@@ -454,51 +472,6 @@ func relFromRepo(path string) string {
 	if err != nil {
 		return path
 	}
-
-	func validateSecretRefs(reg *config.Registry, secretsPath string) error {
-		st, err := secrets.Load(secretsPath)
-		if err != nil {
-			return err
-		}
-		for alias, forgeCfg := range reg.Forges {
-			if forgeCfg.Auth == nil || strings.TrimSpace(forgeCfg.Auth.Secret) == "" {
-				continue
-			}
-			secretNS := strings.TrimSpace(forgeCfg.Auth.Secret)
-			if !st.HasNamespace(secretNS) {
-				return fmt.Errorf("%s: forge %q references missing secret namespace %q", reg.Path, alias, secretNS)
-			}
-		}
-		return nil
-	}
-
-	func validateSecretsIgnored(secretsPath string) error {
-		abs, err := util.MustAbs(secretsPath)
-		if err != nil {
-			return err
-		}
-		repo, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(repo, abs)
-		if err != nil {
-			return nil
-		}
-		if strings.HasPrefix(rel, "..") {
-			return nil
-		}
-		relEntry := "./" + filepath.ToSlash(rel)
-		gitignorePath := filepath.Join(repo, ".gitignore")
-		b, err := os.ReadFile(gitignorePath)
-		if err != nil {
-			return fmt.Errorf("secrets path %q is not ignored by Git", relEntry)
-		}
-		if !util.GitIgnoreContains(string(b), relEntry) && !util.GitIgnoreContains(string(b), filepath.ToSlash(rel)) {
-			return fmt.Errorf("secrets path %q is not ignored by Git", relEntry)
-		}
-		return nil
-	}
 	repo, err := os.Getwd()
 	if err != nil {
 		return path
@@ -510,8 +483,55 @@ func relFromRepo(path string) string {
 	if strings.HasPrefix(rel, "..") {
 		return path
 	}
+	rel = filepath.ToSlash(rel)
 	if !strings.HasPrefix(rel, ".") {
 		return "./" + rel
 	}
 	return rel
+}
+
+func validateSecretRefs(reg *config.Registry, secretsPath string) error {
+	st, err := secrets.Load(secretsPath)
+	if err != nil {
+		return err
+	}
+	for alias, forgeCfg := range reg.Forges {
+		if forgeCfg.Auth == nil || strings.TrimSpace(forgeCfg.Auth.Secret) == "" {
+			continue
+		}
+		secretNS := strings.TrimSpace(forgeCfg.Auth.Secret)
+		if !st.HasNamespace(secretNS) {
+			return fmt.Errorf("%s: forge %q references missing secret namespace %q", reg.Path, alias, secretNS)
+		}
+	}
+	return nil
+}
+
+func validateSecretsIgnored(secretsPath string) error {
+	abs, err := util.MustAbs(secretsPath)
+	if err != nil {
+		return err
+	}
+	repo, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(repo, abs)
+	if err != nil {
+		return nil
+	}
+	if strings.HasPrefix(rel, "..") {
+		return nil
+	}
+	rel = filepath.ToSlash(rel)
+	relEntry := "./" + rel
+	gitignorePath := filepath.Join(repo, ".gitignore")
+	b, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		return fmt.Errorf("secrets path %q is not ignored by Git", relEntry)
+	}
+	if !util.GitIgnoreContains(string(b), relEntry) && !util.GitIgnoreContains(string(b), rel) {
+		return fmt.Errorf("secrets path %q is not ignored by Git", relEntry)
+	}
+	return nil
 }

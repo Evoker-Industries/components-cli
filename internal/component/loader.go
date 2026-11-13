@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Evoker-Industries/components-cli/internal/util"
 )
 
 func Load(path string) (*Component, error) {
@@ -66,10 +68,5 @@ func Save(path string, c *Component) error {
 		Verify:     c.Verify,
 		Validation: c.Validation,
 	}}
-	b, err := json.MarshalIndent(mf, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	return os.WriteFile(path, b, 0o644)
+	return util.WriteJSONAtomic(path, mf, 0o644)
 }
